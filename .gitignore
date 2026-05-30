@@ -1,0 +1,12 @@
+build/
+build-*/
+.qtcreator/
+*.user
+CMakeLists.txt.user*
+android-signing.properties
+*.keystore
+*.jks
+*.bat
+*.log
+err.txt
+out.txt

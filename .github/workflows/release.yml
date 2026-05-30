@@ -1,0 +1,185 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.2'
+          modules: 'qtsensors'
+          cache: true
+      - name: Configure and Build
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR"
+          cmake --build build --config Release
+      - name: Deploy (windeployqt)
+        shell: pwsh
+        run: |
+          mkdir deploy
+          copy build\Release\led-hourglass.exe deploy\
+          windeployqt --qmldir qml --no-compiler-runtime deploy\led-hourglass.exe
+      - name: Archive
+        shell: pwsh
+        run: |
+          $v = "${{ github.ref_name }}"; if ($v -eq "" -or $v -eq "main") { $v = "latest" }
+          Compress-Archive -Path deploy\* -DestinationPath "LedHourglass-Windows-${v}.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-build
+          path: LedHourglass-Windows-*.zip
+
+  build-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgl1-mesa-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libxcb-image0-dev libxcb-keysyms1-dev libxcb-render-util0-dev \
+            libxcb-xinerama0-dev libxcb-icccm4-dev libegl1-mesa-dev
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.2'
+          modules: 'qtsensors'
+          install-deps: 'true'
+          cache: true
+      - name: Configure and Build
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR"
+          cmake --build build
+      - name: Download linuxdeploy & Qt Plugin
+        run: |
+          wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          wget -q https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
+          chmod +x linuxdeploy-x86_64.AppImage linuxdeploy-plugin-qt-x86_64.AppImage
+      - name: Build AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: 1
+          QML_SOURCES_PATHS: ${{ github.workspace }}/qml
+        run: |
+          VERSION="${{ github.ref_name }}"
+          [ "${{ github.ref_type }}" != "tag" ] && VERSION="latest"
+          export VERSION
+          export QMAKE=$QT_ROOT_DIR/bin/qmake
+          cp resources/app_256.png resources/led-hourglass.png
+          ./linuxdeploy-x86_64.AppImage \
+            --appdir AppDir \
+            --executable build/led-hourglass \
+            --desktop-file resources/led-hourglass.desktop \
+            --icon-file resources/led-hourglass.png \
+            --plugin qt \
+            --output appimage
+          rm -f linuxdeploy-x86_64.AppImage linuxdeploy-plugin-qt-x86_64.AppImage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-build
+          path: Led_Hourglass-*.AppImage
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: linux-build-logs
+          path: |
+            cmake_configure.log
+            cmake_build.log
+
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+      - name: Install Android NDK 27
+        run: |
+          echo "y" | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager "ndk;27.2.12479018"
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> $GITHUB_ENV
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.2'
+          host: 'linux'
+          target: 'android'
+          arch: 'android_arm64_v8a'
+          modules: 'qtsensors'
+          extra: '--autodesktop'
+          cache: true
+      - name: Configure
+        run: |
+          cmake -B build-android \
+            -G Ninja \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_NDK=$ANDROID_NDK_ROOT \
+            -DANDROID_PLATFORM=android-28 \
+            -DANDROID_SDK_ROOT=$ANDROID_SDK_ROOT \
+            -DANDROID_STL=c++_shared \
+            -DANDROID_USE_LEGACY_TOOLCHAIN_FILE=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cmake \
+            -DCMAKE_PREFIX_PATH=$QT_ROOT_DIR \
+            -DCMAKE_FIND_ROOT_PATH=$QT_ROOT_DIR \
+            -DQT_HOST_PATH=$QT_HOST_PATH \
+            -DQT_NO_GLOBAL_APK_TARGET_PART_OF_ALL=ON \
+            -DQT_USE_TARGET_ANDROID_BUILD_DIR=ON
+      - name: Build
+        run: |
+          cmake --build build-android
+          cmake --build build-android --target apk
+      - name: Sign APK
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_ALIAS: ${{ secrets.ANDROID_KEYSTORE_ALIAS }}
+          ANDROID_KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASS }}
+        run: |
+          VERSION="${{ github.ref_name }}"
+          [ "${{ github.ref_type }}" != "tag" ] && VERSION="latest"
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > release.jks
+          UNSIGNED=$(find build-android -name "*-release-unsigned.apk" | head -1)
+          APKSIGNER=$(find $ANDROID_SDK_ROOT/build-tools -name apksigner | sort -V | tail -1)
+          $APKSIGNER sign \
+            --ks release.jks \
+            --ks-key-alias "$ANDROID_KEYSTORE_ALIAS" \
+            --ks-pass "pass:$ANDROID_KEYSTORE_PASS" \
+            --key-pass "pass:$ANDROID_KEYSTORE_PASS" \
+            --out "LedHourglass-Android-${VERSION}.apk" \
+            "$UNSIGNED"
+          rm -f release.jks
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-build
+          path: LedHourglass-Android-*.apk
+
+  release:
+    needs: [build-windows, build-linux, build-android]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: windows-build }
+      - uses: actions/download-artifact@v4
+        with: { name: linux-build }
+      - uses: actions/download-artifact@v4
+        with: { name: android-build }
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            LedHourglass-Windows-*.zip
+            Led_Hourglass-*.AppImage
+            LedHourglass-Android-*.apk
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

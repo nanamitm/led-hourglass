@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=LED Hourglass
+Comment=Tilt-responsive LED hourglass timer
+Exec=led-hourglass
+Icon=led-hourglass
+Categories=Utility;
