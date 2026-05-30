@@ -87,7 +87,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: linux-build
-          path: Led_Hourglass-*.AppImage
+          path: LED_Hourglass-*.AppImage
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
@@ -177,7 +177,7 @@ jobs:
         with:
           files: |
             LedHourglass-Windows-*.zip
-            Led_Hourglass-*.AppImage
+            LED_Hourglass-*.AppImage
             LedHourglass-Android-*.apk
           draft: false
           prerelease: false
